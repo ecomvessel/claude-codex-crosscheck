@@ -6,10 +6,31 @@ on:
   pull_request:
 
 jobs:
-  validate:
-    name: validate
-    runs-on: ubuntu-latest
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is where most people run this (BSD awk/sed, bash 3.2); Linux is the GNU side.
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Run repo self-test
-        run: bash scripts/validate.sh
+        run: /bin/bash scripts/validate.sh
+      - name: Shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck -S warning install.sh quick-install.sh scripts/validate.sh
+
+  # main's branch protection requires a check named exactly "validate" — this job is it.
+  # It passes only if every OS above passed. Rename it and every PR is blocked forever.
+  validate:
+    name: validate
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All OS jobs passed
+        run: |
+          echo "test result: ${{ needs.test.result }}"
+          [ "${{ needs.test.result }}" = "success" ]

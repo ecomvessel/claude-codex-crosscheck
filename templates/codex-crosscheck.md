@@ -15,9 +15,9 @@ instruction file (the repo's own CLAUDE.md / AGENTS.md) says this repo must NOT 
 other vendor, honor that — say so and run the single-vendor fallback instead.
 
 **IF YOU ARE THE REVIEWER, STOP HERE.** If this session was itself invoked as a cross-check reviewer
-(e.g. launched by another tool via `codex exec`/`claude -p` to review a plan or diff), do NOT start
-your own cross-check — just return your findings. This prevents an infinite reviewer-reviews-the-
-reviewer loop.
+(e.g. launched by another tool via `codex exec`/`claude -p` to review a plan or diff, or the prompt
+starts with "You are the cross-check REVIEWER"), do NOT start your own cross-check — just return
+your findings. This prevents an infinite reviewer-reviews-the-reviewer loop.
 
 **WHEN it fires (the trigger = "danger or design"):** before implementing any plan that touches
 production, customer data, DB migrations, auth, payments, or credentials — OR that designs the
@@ -26,17 +26,37 @@ whether a plan qualifies, it qualifies. Note: on a repo where *most* work is pro
 this fires often by design — if that's too much, the user can say "high only" for the session to
 narrow the trigger and cut spend.
 
-**HOW:** run non-interactively, review-only — Claude may read, never write (the prompt must come
-BEFORE the flag):
-`claude -p "<review prompt>" --allowedTools Read Grep Glob`
-Prompt it adversarially: "find what's broken, wrong, missing, or will bite in production" and include
-the plan (or diff) plus the severity floor.
+**HOW:** run non-interactively, review-only — Claude may read, never write. Three steps:
+1. **Write the review prompt to a NEW temp file with your file-writing tool** (e.g.
+   `/tmp/crosscheck-<random>.md`) — never `echo` it and never put it inline in a command. Start the
+   file with these two lines, then the plan or diff:
+   ```
+   You are the cross-check REVIEWER, invoked by Codex. Do NOT start a cross-check of your own.
+   Find what's broken, wrong, missing, or will bite in production. Severity floor: MEDIUM and up.
+   ```
+2. **Run it with that file on stdin and a timeout of at least 600000 ms (10 minutes):**
+   `claude -p --tools Read,Grep,Glob --permission-mode plan --strict-mcp-config < /tmp/crosscheck-<random>.md`
+3. **Delete the file afterwards** (`rm -f`) — it can hold secrets from the diff.
 
-**TIMEOUT / hang handling:** if the reviewer call hangs or errors, treat it as a failed round and go
-to FALLBACK below — do not wait indefinitely and do not silently drop the check. (There is no
-enforced timer here; if you want a hard limit and have GNU coreutils, wrap the call in
-`timeout 300 …` / `gtimeout 300 …`.) If a sandbox blocks the command or its network access, ASK the
-user to approve running it — never silently skip the check.
+Each part prevents a failure that has really happened:
+- **`--tools Read,Grep,Glob` is what makes it read-only** — those become the ONLY tools that exist.
+  Do NOT swap in `--allowedTools`: that only *adds* permissions on top of the user's own settings,
+  so anyone who allows Edit or Bash globally gets a "reviewer" that can write files (tested: it did).
+- **`--permission-mode plan`** overrides a user default of auto / bypassPermissions;
+  **`--strict-mcp-config`** loads no MCP servers (no side doors, faster start).
+- **The prompt comes from a file, on stdin.** Plan text typed into a shell command can execute
+  (plans contain backticks and `$`), and an open stdin can leave the CLI waiting forever. No
+  file-writing tool? A heredoc is safe ONLY with a quoted delimiter you invent fresh each time and
+  that appears nowhere in the prompt, e.g. `<<'CROSSCHECK_9f3c1a7e'` — with a fixed word, a plan
+  line matching it ends the heredoc early and the rest of the plan runs as shell commands.
+- **The first line names it the reviewer**, so it does not start a cross-check of its own.
+- **10 minutes** because a real review takes 1–10; a short timeout cuts it off halfway and makes it
+  look like Claude failed.
+
+**TIMEOUT / hang handling:** if the reviewer call times out or errors, treat it as a failed round and
+go to FALLBACK below — do not wait indefinitely and do not silently drop the check. If a sandbox
+blocks the command or its network access, ASK the user to approve running it — never silently skip
+the check.
 
 **macOS Keychain gotcha — a fake "Not logged in":** Claude Code stores its login in the macOS
 Keychain. Run inside a sandbox, `claude -p` fails in under a second with
@@ -62,9 +82,8 @@ resubmit. Exit the moment Claude returns no findings at/above the floor.
 
 **FALLBACK:** if `claude` is missing, genuinely unauthenticated (see the Keychain gotcha above —
 verify outside the sandbox before concluding this), or hangs/errors twice (one retry, then give
-up) → run the adversarial review
-yourself in a separate fresh pass and SAY the cross-check ran single-vendor in the receipt. Do not
-silently skip the check.
+up) → run the adversarial review yourself in a separate fresh pass and SAY the cross-check ran
+single-vendor in the receipt. Do not silently skip the check.
 
 **RECEIPT — show what actually happened (a self-report, not proof):** whenever a plan is presented or
 a build begins after a cross-check, state it visibly in ONE line, and name which mode ran:

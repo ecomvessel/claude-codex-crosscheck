@@ -15,9 +15,9 @@ instruction file (the repo's own CLAUDE.md / AGENTS.md) says this repo must NOT 
 other vendor, honor that — say so and run the single-vendor fallback instead.
 
 **IF YOU ARE THE REVIEWER, STOP HERE.** If this session was itself invoked as a cross-check reviewer
-(e.g. launched by another tool via `claude -p`/`codex exec` to review a plan or diff), do NOT start
-your own cross-check — just return your findings. This prevents an infinite reviewer-reviews-the-
-reviewer loop.
+(e.g. launched by another tool via `claude -p`/`codex exec` to review a plan or diff, or the prompt
+starts with "You are the cross-check REVIEWER"), do NOT start your own cross-check — just return
+your findings. This prevents an infinite reviewer-reviews-the-reviewer loop.
 
 **WHEN it fires (the trigger = "danger or design"):** before implementing any plan that touches
 production, customer data, DB migrations, auth, payments, or credentials — OR that designs the
@@ -26,21 +26,37 @@ When in doubt whether a plan qualifies, it qualifies. Note: on a repo where *mos
 production/customer-data, this fires often by design — if that's too much, the user can say
 "high only" for the session to narrow the trigger and cut spend.
 
-**HOW:** run non-interactively, review-only — Codex may read, never write:
-`codex exec --sandbox read-only "<review prompt>"`
-If that call fails with a git-repo error (you're outside a git repo), retry ONCE with
-`codex exec --sandbox read-only --skip-git-repo-check "<review prompt>"`. Prompt it adversarially:
-"find what's broken, wrong, missing, or will bite in production" and include the plan (or diff) plus
-the severity floor.
+**HOW:** run non-interactively, review-only — Codex may read, never write. Three steps:
+1. **Write the review prompt to a NEW temp file with your file-writing tool** (e.g.
+   `/tmp/crosscheck-<random>.md`) — never `echo` it and never put it inline in a command. Start the
+   file with these two lines, then the plan or diff:
+   ```
+   You are the cross-check REVIEWER, invoked by Claude Code. Do NOT start a cross-check of your own.
+   Find what's broken, wrong, missing, or will bite in production. Severity floor: MEDIUM and up.
+   ```
+2. **Run it with that file on stdin and a 10-minute timeout** (Claude Code's Bash tool:
+   `timeout: 600000`):
+   `codex exec --sandbox read-only --skip-git-repo-check - < /tmp/crosscheck-<random>.md`
+3. **Delete the file afterwards** (`rm -f`) — it can hold secrets from the diff.
 
-**TIMEOUT / hang handling:** if the reviewer call hangs or errors, treat it as a failed round and go
-to FALLBACK below — do not wait indefinitely and do not silently drop the check. (There is no
-enforced timer here; if you want a hard limit and have GNU coreutils, wrap the call in
-`timeout 300 …`. Stock macOS has no `timeout` — `brew install coreutils` provides `gtimeout`.) If a
-sandbox blocks the command or its network access, ASK the user to approve running it — never
-silently skip the check. A near-instant auth or network error from `codex` usually means YOUR
-sandbox blocked the call (keychain/network), not that Codex is logged out — retry outside the
-sandbox (with the user's approval) before concluding it's unauthenticated.
+Each part prevents a failure that has really happened:
+- **The prompt comes from a file, on stdin (`- < file`).** If stdin is left open, `codex exec`
+  prints `Reading additional input from stdin...` and waits forever with zero output — it looks
+  exactly like a slow review. And plan text typed into a shell command can execute (plans contain
+  backticks and `$`). No file-writing tool? A heredoc is safe ONLY with a quoted delimiter you invent
+  fresh each time and that appears nowhere in the prompt, e.g. `<<'CROSSCHECK_9f3c1a7e'` — with a
+  fixed word, a plan line matching it ends the heredoc early and the rest runs as shell commands.
+- **The first line names it the reviewer**, so it does not start a cross-check of its own.
+- **`--skip-git-repo-check`** so a run outside a git repo doesn't fail; harmless in a read-only sandbox.
+- **10 minutes** because a real review takes 1–10. Claude Code's default 2-minute Bash limit cuts a
+  normal review off halfway and makes it look like Codex failed.
+
+**TIMEOUT / hang handling:** if the reviewer call times out or errors, treat it as a failed round and
+go to FALLBACK below — do not wait indefinitely and do not silently drop the check. If a sandbox
+blocks the command or its network access, ASK the user to approve running it — never silently skip
+the check. A near-instant auth or network error from `codex` usually means YOUR sandbox blocked the
+call (keychain/network), not that Codex is logged out — retry outside the sandbox (with the user's
+approval) before concluding it's unauthenticated.
 
 **SEVERITY floor (token control):** default = MEDIUM and up (blockers + real design flaws + missing
 pieces; no style nitpicks). The user can say "check everything" or "high only" on any single plan to

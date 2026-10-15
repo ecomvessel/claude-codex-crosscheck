@@ -20,15 +20,17 @@ second-vendor reviewer, without you copy-pasting anything between them.
 - [Claude Code](https://claude.com/claude-code) installed and logged in (`claude`)
 - [Codex CLI](https://developers.openai.com/codex/cli) installed and logged in (`codex`)
 
-Tested against **`claude` 2.1.x** and **`codex` 0.14x** on macOS. The rules call each CLI with
-specific flags (`codex exec --sandbox read-only`, `claude -p … --allowedTools …`); if a future version
-renames a flag, see **Troubleshooting** below. The Codex→Claude direction also assumes Codex
+Last tested end to end on 2026-10-15 against **`claude` 2.1.300** and **`codex` 0.160.1** on macOS.
+The rules call each CLI with specific flags (`codex exec --sandbox read-only …`,
+`claude -p --tools Read,Grep,Glob --permission-mode plan …`); if a future version renames a flag,
+`./install.sh --check` tells you, and **Troubleshooting** below says what to do. The Codex→Claude direction also assumes Codex
 auto-loads `~/.codex/AGENTS.md` as global instructions — confirm your Codex version does (see *Verify
 it's live*).
 
 You can install with only one CLI present, but then only the tool you actually run will act — and when
 it tries to call the *absent* one, it falls back to a single-vendor self-review (you're not getting
-true dual-vendor coverage until both are installed).
+true dual-vendor coverage until both are installed). `./install.sh --check` reports the missing CLI
+as a problem until you install it.
 
 ## Quickstart
 
@@ -54,7 +56,19 @@ cd claude-codex-crosscheck
 ./install.sh
 ```
 
-Then start a **new** session in either tool. That's it.
+Then check it, and start a **new** session in either tool:
+
+```bash
+./install.sh --check      # or: curl -fsSL …/quick-install.sh | bash -s -- --check
+```
+
+`--check` changes nothing and calls no model. It confirms both blocks are installed and current,
+both CLIs are on your PATH, and both still support every flag the rules use.
+
+**Already have your own cross-check rule** (a "Cross-Check" heading you wrote yourself in
+`CLAUDE.md` / `AGENTS.md`)? On a first install the installer leaves that file alone rather than add
+a second rule that disagrees with yours. Delete or rename your section and re-run, or use
+`./install.sh --force`. Once this block is in a file, plain re-runs always update it.
 
 ## How it behaves
 
@@ -63,8 +77,16 @@ Then start a **new** session in either tool. That's it.
   Routine edits skip it. When in doubt, it treats the plan as qualifying.
 - **Review-only.** The reviewer can read your code and the plan but cannot write, commit, or deploy.
   The two directions enforce this differently: Codex runs in a real OS **sandbox** (`--sandbox
-  read-only`), while Claude is limited to **read-only tools** (`--allowedTools Read Grep Glob`) — a
-  permission restriction rather than a sandbox. Same outcome, different mechanism.
+  read-only`), while Claude is given **only read tools** (`--tools Read,Grep,Glob`, plus
+  `--permission-mode plan`) — a tool restriction rather than a sandbox. Both were tested by asking
+  the reviewer to create a file; both refused. (Earlier versions used `--allowedTools`, which only
+  *adds* permissions: anyone whose settings allow Edit or Bash got a reviewer that could write.
+  Re-run the installer to pick up the fix.)
+- **The plan is never typed into a shell command.** The rule has the assistant write the review
+  prompt to a temp file with its file-writing tool, feed it to the reviewer on stdin, then delete
+  it. Plan text in a command line can execute (backticks, `$`), so this matters. It also fixes the
+  classic hang where `codex exec` waits forever on an open stdin (`Reading additional input from
+  stdin...`, zero output).
 - **Loops, then asks — default up to 6 rounds.** Reviewer finds issues → author fixes → resubmit →
   repeat until clean. Most plans settle in 1–2 rounds. If the two models still disagree at the cap, it
   **stops and asks you** ("still disagreeing after 6 — run 2 more, or you decide?") rather than looping
@@ -136,10 +158,11 @@ bounds *writes*, not *what it reads and sends*.
 Because this is an instruction file (not enforced machinery), a half-broken install can fail
 **silently** — nothing errors, the check just never fires. Confirm it works once after installing:
 
-1. Start a **new** session in the tool.
-2. Give it a small qualifying plan, e.g. *"Plan a change to an auth or payments file"* (something in
+1. Run `./install.sh --check`. It must end with "All good".
+2. Start a **new** session in the tool.
+3. Give it a small qualifying plan, e.g. *"Plan a change to an auth or payments file"* (something in
    the "danger or design" trigger).
-3. You should see the reviewer actually run (a `codex exec` / `claude -p` call) and a
+4. You should see the reviewer actually run (a `codex exec` / `claude -p` call) and a
    `🔁 Cross-check:` receipt. No receipt on a clearly-qualifying plan = that direction isn't wired up.
 
 ## Known failure behavior
@@ -151,8 +174,9 @@ guaranteed machinery. What to expect:
 |---|---|---|
 | Other CLI **not installed** | Falls back to single-vendor self-review | Receipt says `single-vendor` |
 | Other CLI **not logged in / errors** | Retries once, then single-vendor fallback | Receipt says `single-vendor` |
-| Reviewer **hangs** | No enforced timer — relies on the host's own call timeout, then treats it as a failed round → fallback | Receipt says `single-vendor` (may be slow) |
-| Run **outside a git repo** | Retries with `--skip-git-repo-check` (Codex) | Normal receipt |
+| Reviewer **hangs** | The #1 cause (Codex waiting on stdin) is fixed by feeding the prompt from a file. Otherwise the rule tells the assistant to use a 10-minute shell timeout, then treat a timeout as a failed round → fallback | Receipt says `single-vendor` (may be slow) |
+| Review **cut off at 2 minutes** | Claude Code's Bash tool defaults to a 2-minute limit; the rule tells Claude to use the 10-minute maximum, since real reviews take 1–10 minutes | Normal receipt |
+| Run **outside a git repo** | `--skip-git-repo-check` is always passed (harmless in a read-only sandbox) | Normal receipt |
 | **Sandbox blocks the reviewer** (most common: Codex's sandbox blocks `claude`'s macOS Keychain access → a fake `Not logged in` in <1s) | Rule says: treat as a sandbox block, ask to re-run outside the sandbox — only then fall back | Approval prompt, or receipt says `single-vendor` if declined |
 | Codex doesn't auto-load `~/.codex/AGENTS.md` | That direction is **silently inert** | **No receipt** — catch it with *Verify it's live* |
 | Reviewer reads its own rule | Recursion guard tells it not to re-cross-check | Single review, no nested loop |
@@ -171,8 +195,12 @@ guaranteed machinery. What to expect:
   `codex exec …` / `claude -p …` lines in `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md`.
 - **You never see a receipt at all.** The rule file may not be loading. Confirm the managed block is
   present in the right file, and run *Verify it's live*.
-- **Want a hard timeout on reviewer calls?** Stock macOS has no `timeout`; `brew install coreutils`
-  gives `gtimeout`, then you can wrap the reviewer commands in the rule.
+- **Codex "review" sits there forever with no output.** That's `codex exec` waiting on stdin. The
+  current rule feeds the prompt from a file, which prevents it; if you see it, your installed block
+  is old. Run `./install.sh --check`, then re-run the installer.
+- **The installer says a file "already has its own cross-check rule".** It found a heading containing
+  "Cross-Check" that it didn't write, and left the file alone so you don't get two rules that
+  disagree. Remove or rename your section, or re-run with `--force` to keep both.
 
 ## Stacks cleanly with other rule packs
 
@@ -186,7 +214,9 @@ they coexist.
 ## Updating and removing
 
 - **Update:** re-run the installer. It replaces only its own block.
-- **Remove:** `./install.sh --uninstall` (or re-download and run `quick-install.sh --uninstall`).
+- **Check:** `./install.sh --check` (or `curl -fsSL …/quick-install.sh | bash -s -- --check`). Run
+  it after updating either CLI.
+- **Remove:** `./install.sh --uninstall` (or `curl -fsSL …/quick-install.sh | bash -s -- --uninstall`).
   It strips only its own block and leaves the rest of your rules alone.
 - **Backups:** every change first saves a unique `*.bak-crosscheck.*` copy of the file next to it in
   `~/.claude` / `~/.codex`. These are never auto-deleted — delete them yourself whenever you like.
@@ -196,8 +226,9 @@ they coexist.
 ```
 templates/claude-crosscheck.md   the block installed into ~/.claude/CLAUDE.md
 templates/codex-crosscheck.md    the block installed into ~/.codex/AGENTS.md
-install.sh                       installs / updates / --uninstalls the blocks
+install.sh                       installs / updates / --check / --uninstall
 quick-install.sh                 curl|bash wrapper that downloads + runs install.sh
+scripts/validate.sh              self-test CI runs on every push (macOS + Linux)
 ```
 
 ## License
