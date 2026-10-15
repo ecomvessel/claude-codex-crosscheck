@@ -15,9 +15,13 @@
 #     marker makes the script ABORT that file with a clear message instead of deleting content.
 #   • Symlinked targets are written through (the link is preserved); file mode is preserved.
 #   • If the resulting content is identical to what's already there, nothing is written at all.
+#   • If a file already has its OWN cross-check rule (a "Cross-Check" heading outside the managed
+#     block), that file is left untouched so you never end up with two conflicting rules.
 #
 # Usage:
 #   ./install.sh              # install / update
+#   ./install.sh --force      # install even if a hand-written cross-check rule is already there
+#   ./install.sh --check      # read-only health check: blocks current? CLIs present? flags still valid?
 #   ./install.sh --uninstall  # remove only the managed block from both files
 #
 # This stacks cleanly on top of other instruction packs (e.g. claude-code-model-switch):
@@ -106,6 +110,12 @@ guard_regular() {
   return 0
 }
 
+# own_rule_heading <file> : print the first "Cross-Check" heading in <file> (run it on the STRIPPED
+# copy, so the managed block's own heading never counts). Exit 1 if there is none.
+own_rule_heading() {
+  grep -m1 -iE '^#+[[:space:]].*cross-check' "$1"
+}
+
 # upsert <target_file> <template_file> <label>
 upsert() {
   local target="$1" tmpl="$2" label="$3"
@@ -122,6 +132,15 @@ upsert() {
   stripped="$(mktemp)"
   strip_to "$target" "$stripped" || rc=$?
   if [ "$rc" -ne 0 ]; then abort_marker "$rc" "$target" "$label"; rm -f "$stripped"; return; fi
+
+  local own
+  if [ "$FORCE" -eq 0 ] && own="$(own_rule_heading "$stripped")"; then
+    FAILED=1
+    echo "✗ ${label}: ${target} already has its own cross-check rule (\"${own}\") — left UNTOUCHED,"
+    echo "    so you don't end up with two rules that disagree. Delete or rename that section and"
+    echo "    re-run, or re-run with --force to add this one alongside it."
+    rm -f "$stripped"; return
+  fi
 
   # was a block present? (stripped == target means nothing was removed -> this is an append)
   local appending=0
@@ -181,15 +200,112 @@ remove() {
   rm -f "$stripped" "$finalf"
 }
 
-case "${1:-}" in
-  ""|--uninstall) ;;
-  *) echo "Unknown option: ${1}" >&2; echo "Usage: ./install.sh [--uninstall]" >&2; exit 1 ;;
-esac
+# ---------- --check : read-only health check (no API calls, writes nothing) ----------
+PROBLEMS=0
+problem() { PROBLEMS=$((PROBLEMS+1)); echo "✗ $1"; }
+
+# extract_block <file> : print the first managed block (BEGIN..END lines included)
+extract_block() {
+  awk '/^<!-- BEGIN claude-codex-crosscheck/ { p = 1 }
+       p { print }
+       p && /^<!-- END claude-codex-crosscheck -->/ { exit }' "$1"
+}
+
+check_file() {  # <target> <template> <label>
+  local target="$1" tmpl="$2" label="$3"
+  if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+    problem "${label}: ${target} does not exist — not installed. Run ./install.sh"; return
+  fi
+  if [ ! -f "$target" ] || [ ! -r "$target" ]; then
+    problem "${label}: ${target} is not a readable regular file."; return
+  fi
+  local stripped rc=0 blk
+  stripped="$(mktemp)"
+  strip_to "$target" "$stripped" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    problem "${label}: ${target} has broken BEGIN/END markers — fix by hand, then re-run ./install.sh"
+    rm -f "$stripped"; return
+  fi
+  blk="$(mktemp)"
+  extract_block "$target" > "$blk"
+  local own="" has_own=0
+  own="$(own_rule_heading "$stripped")" && has_own=1
+  if [ ! -s "$blk" ] && [ "$has_own" -eq 1 ]; then
+    echo "• ${label}: ${target} uses its own hand-written cross-check rule (\"${own}\"), not this"
+    echo "    installer's block. Fine if that's on purpose; this tool won't check or change it."
+  elif [ ! -s "$blk" ]; then
+    problem "${label}: no cross-check block in ${target} — not installed. Run ./install.sh"
+  elif cmp -s "$blk" "$tmpl"; then
+    echo "✓ ${label}: cross-check block in ${target} is current."
+  else
+    problem "${label}: the block in ${target} is outdated or was hand-edited. Re-run ./install.sh to refresh it."
+  fi
+  if [ -s "$blk" ] && [ "$has_own" -eq 1 ]; then
+    echo "⚠ ${label}: ${target} ALSO has a hand-written cross-check rule (\"${own}\") — two rules may disagree."
+  fi
+  rm -f "$stripped" "$blk"
+}
+
+check_cli() {  # <name> <help-command...> -- <required flag...>
+  local name="$1"; shift
+  local cmd=() flags=() seen=0 a h f missing=""
+  for a in "$@"; do
+    if [ "$seen" -eq 0 ] && [ "$a" = "--" ]; then seen=1; continue; fi
+    if [ "$seen" -eq 0 ]; then cmd+=("$a"); else flags+=("$a"); fi
+  done
+  if ! command -v "$name" >/dev/null 2>&1; then
+    echo "⚠ '${name}' is not on PATH — that direction will fall back to single-vendor review."; return
+  fi
+  h="$("${cmd[@]}" 2>&1 || true)"
+  for f in "${flags[@]}"; do
+    [[ "$h" == *"$f"* ]] || missing="${missing} ${f}"
+  done
+  if [ -n "$missing" ]; then
+    problem "'${name}' no longer lists:${missing} — this CLI version renamed flags the rules depend on. See Troubleshooting in the README."
+  else
+    echo "✓ '${name}' found ($(command -v "$name")) and supports every flag the rules use."
+  fi
+}
+
+usage() {
+  echo "Usage: ./install.sh [--force | --check | --uninstall]"
+  echo "  (no option)  install or update the cross-check blocks"
+  echo "  --force      install even if a hand-written cross-check rule is already there"
+  echo "  --check      read-only health check; changes nothing"
+  echo "  --uninstall  remove only this installer's blocks"
+}
+
+MODE=install
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall) MODE=uninstall ;;
+    --check)     MODE=check ;;
+    --force)     FORCE=1 ;;
+    -h|--help)   usage; exit 0 ;;
+    *) echo "Unknown option: ${arg}" >&2; usage >&2; exit 1 ;;
+  esac
+done
 
 echo "Claude ⇄ Codex Cross-Check"
 echo
 
-if [ "${1:-}" = "--uninstall" ]; then
+if [ "$MODE" = "check" ]; then
+  check_file "$CLAUDE_FILE" "$CLAUDE_TMPL" "Claude"
+  check_file "$CODEX_FILE"  "$CODEX_TMPL"  "Codex"
+  check_cli claude claude --help -- --print --tools --permission-mode --strict-mcp-config
+  check_cli codex  codex exec --help -- --sandbox --skip-git-repo-check
+  echo
+  if [ "$PROBLEMS" -eq 0 ]; then
+    echo "All good. Last step only you can do: start a NEW session and ask for a plan that touches auth"
+    echo "or payments — you should see the other CLI actually run and a '🔁 Cross-check:' receipt."
+    exit 0
+  fi
+  echo "${PROBLEMS} problem(s) found (see ✗ above)."
+  exit 1
+fi
+
+if [ "$MODE" = "uninstall" ]; then
   remove "$CLAUDE_FILE" "Claude"
   remove "$CODEX_FILE"  "Codex"
   echo
@@ -223,4 +339,5 @@ if [ "$have_claude" -eq 1 ] && [ "$have_codex" -eq 1 ]; then
 fi
 echo
 echo "Done. Start a new session in either tool and it will cross-check danger/design plans automatically."
-echo "To remove later:  ./install.sh --uninstall   (backups are named *.bak-crosscheck.*)"
+echo "Health check any time:  ./install.sh --check"
+echo "To remove later:        ./install.sh --uninstall   (backups are named *.bak-crosscheck.*)"

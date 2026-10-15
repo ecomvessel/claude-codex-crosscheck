@@ -7,9 +7,17 @@ on:
 
 jobs:
   validate:
-    name: validate
-    runs-on: ubuntu-latest
+    name: validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is where most people run this (BSD awk/sed, bash 3.2); Linux is the GNU side.
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Run repo self-test
         run: bash scripts/validate.sh
+      - name: Shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck -S warning install.sh quick-install.sh scripts/validate.sh
