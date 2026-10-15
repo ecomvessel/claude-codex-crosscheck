@@ -133,18 +133,20 @@ upsert() {
   strip_to "$target" "$stripped" || rc=$?
   if [ "$rc" -ne 0 ]; then abort_marker "$rc" "$target" "$label"; rm -f "$stripped"; return; fi
 
+  # was a block present? (stripped == target means nothing was removed -> this is an append)
+  local appending=0
+  cmp -s "$stripped" "$target" && appending=1
+
+  # Only a FIRST install is held back by a hand-written rule. Once our block is in the file, updates
+  # always go through — otherwise a user could be stranded on an old, broken block.
   local own
-  if [ "$FORCE" -eq 0 ] && own="$(own_rule_heading "$stripped")"; then
+  if [ "$appending" -eq 1 ] && [ "$FORCE" -eq 0 ] && own="$(own_rule_heading "$stripped")"; then
     FAILED=1
     echo "✗ ${label}: ${target} already has its own cross-check rule (\"${own}\") — left UNTOUCHED,"
     echo "    so you don't end up with two rules that disagree. Delete or rename that section and"
     echo "    re-run, or re-run with --force to add this one alongside it."
     rm -f "$stripped"; return
   fi
-
-  # was a block present? (stripped == target means nothing was removed -> this is an append)
-  local appending=0
-  cmp -s "$stripped" "$target" && appending=1
 
   local newf; newf="$(mktemp)"
   if [ -s "$stripped" ]; then trim_trailing_blanks < "$stripped"; printf '\n'; fi > "$newf"
@@ -254,7 +256,8 @@ check_cli() {  # <name> <help-command...> -- <required flag...>
     if [ "$seen" -eq 0 ]; then cmd+=("$a"); else flags+=("$a"); fi
   done
   if ! command -v "$name" >/dev/null 2>&1; then
-    echo "⚠ '${name}' is not on PATH — that direction will fall back to single-vendor review."; return
+    problem "'${name}' is not on PATH — reviews that should go to ${name} will only be self-reviews (single-vendor)."
+    return
   fi
   h="$("${cmd[@]}" 2>&1 || true)"
   for f in "${flags[@]}"; do
@@ -277,10 +280,14 @@ usage() {
 
 MODE=install
 FORCE=0
+set_mode() {
+  if [ "$MODE" != install ]; then echo "Pick one of --check / --uninstall, not both." >&2; usage >&2; exit 1; fi
+  MODE="$1"
+}
 for arg in "$@"; do
   case "$arg" in
-    --uninstall) MODE=uninstall ;;
-    --check)     MODE=check ;;
+    --uninstall) set_mode uninstall ;;
+    --check)     set_mode check ;;
     --force)     FORCE=1 ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "Unknown option: ${arg}" >&2; usage >&2; exit 1 ;;

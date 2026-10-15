@@ -65,8 +65,9 @@ Then check it, and start a **new** session in either tool:
 both CLIs are on your PATH, and both still support every flag the rules use.
 
 **Already have your own cross-check rule** (a "Cross-Check" heading you wrote yourself in
-`CLAUDE.md` / `AGENTS.md`)? The installer leaves that file alone rather than add a second rule that
-disagrees with yours. Delete or rename your section and re-run, or use `./install.sh --force`.
+`CLAUDE.md` / `AGENTS.md`)? On a first install the installer leaves that file alone rather than add
+a second rule that disagrees with yours. Delete or rename your section and re-run, or use
+`./install.sh --force`. Once this block is in a file, plain re-runs always update it.
 
 ## How it behaves
 
@@ -80,9 +81,11 @@ disagrees with yours. Delete or rename your section and re-run, or use `./instal
   the reviewer to create a file; both refused. (Earlier versions used `--allowedTools`, which only
   *adds* permissions: anyone whose settings allow Edit or Bash got a reviewer that could write.
   Re-run the installer to pick up the fix.)
-- **The plan never touches your shell.** The rule writes the review prompt to a temp file and feeds
-  it to the reviewer on stdin. That also fixes the classic hang where `codex exec` waits forever on
-  an open stdin (`Reading additional input from stdin...`, zero output).
+- **The plan is never typed into a shell command.** The rule has the assistant write the review
+  prompt to a temp file with its file-writing tool, feed it to the reviewer on stdin, then delete
+  it. Plan text in a command line can execute (backticks, `$`), so this matters. It also fixes the
+  classic hang where `codex exec` waits forever on an open stdin (`Reading additional input from
+  stdin...`, zero output).
 - **Loops, then asks — default up to 6 rounds.** Reviewer finds issues → author fixes → resubmit →
   repeat until clean. Most plans settle in 1–2 rounds. If the two models still disagree at the cap, it
   **stops and asks you** ("still disagreeing after 6 — run 2 more, or you decide?") rather than looping
@@ -171,7 +174,7 @@ guaranteed machinery. What to expect:
 | Other CLI **not installed** | Falls back to single-vendor self-review | Receipt says `single-vendor` |
 | Other CLI **not logged in / errors** | Retries once, then single-vendor fallback | Receipt says `single-vendor` |
 | Reviewer **hangs** | The #1 cause (Codex waiting on stdin) is fixed by feeding the prompt from a file. Otherwise the rule tells the assistant to use a 10-minute shell timeout, then treat a timeout as a failed round → fallback | Receipt says `single-vendor` (may be slow) |
-| Review **killed at 2 minutes** | Claude Code's Bash tool defaults to a 2-minute limit; the rule tells Claude to use the 10-minute maximum, since real reviews take 1–10 minutes | Normal receipt |
+| Review **cut off at 2 minutes** | Claude Code's Bash tool defaults to a 2-minute limit; the rule tells Claude to use the 10-minute maximum, since real reviews take 1–10 minutes | Normal receipt |
 | Run **outside a git repo** | `--skip-git-repo-check` is always passed (harmless in a read-only sandbox) | Normal receipt |
 | **Sandbox blocks the reviewer** (most common: Codex's sandbox blocks `claude`'s macOS Keychain access → a fake `Not logged in` in <1s) | Rule says: treat as a sandbox block, ask to re-run outside the sandbox — only then fall back | Approval prompt, or receipt says `single-vendor` if declined |
 | Codex doesn't auto-load `~/.codex/AGENTS.md` | That direction is **silently inert** | **No receipt** — catch it with *Verify it's live* |

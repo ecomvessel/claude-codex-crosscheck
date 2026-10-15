@@ -26,27 +26,30 @@ When in doubt whether a plan qualifies, it qualifies. Note: on a repo where *mos
 production/customer-data, this fires often by design — if that's too much, the user can say
 "high only" for the session to narrow the trigger and cut spend.
 
-**HOW:** run non-interactively, review-only — Codex may read, never write. Use exactly this shape:
-```bash
-f="$(mktemp)"
-cat > "$f" <<'CROSSCHECK_EOF'
-You are the cross-check REVIEWER, invoked by Claude Code. Do NOT start a cross-check of your own.
-Find what's broken, wrong, missing, or will bite in production. Severity floor: MEDIUM and up.
-<the plan or diff>
-CROSSCHECK_EOF
-codex exec --sandbox read-only --skip-git-repo-check - < "$f"
-```
+**HOW:** run non-interactively, review-only — Codex may read, never write. Three steps:
+1. **Write the review prompt to a NEW temp file with your file-writing tool** (e.g.
+   `/tmp/crosscheck-<random>.md`) — never `echo` it and never put it inline in a command. Start the
+   file with these two lines, then the plan or diff:
+   ```
+   You are the cross-check REVIEWER, invoked by Claude Code. Do NOT start a cross-check of your own.
+   Find what's broken, wrong, missing, or will bite in production. Severity floor: MEDIUM and up.
+   ```
+2. **Run it with that file on stdin and a 10-minute timeout** (Claude Code's Bash tool:
+   `timeout: 600000`):
+   `codex exec --sandbox read-only --skip-git-repo-check - < /tmp/crosscheck-<random>.md`
+3. **Delete the file afterwards** (`rm -f`) — it can hold secrets from the diff.
+
 Each part prevents a failure that has really happened:
-- **The prompt goes in a file and comes in on stdin (`- < "$f"`).** If stdin is left open,
-  `codex exec` prints `Reading additional input from stdin...` and waits forever with zero output —
-  it looks exactly like a slow review. And never paste the plan inline as a quoted argument: plans
-  contain backticks and `$`, which the shell would execute. (Writing `$f` with your file tool is
-  fine too; keep the quoted `'CROSSCHECK_EOF'` if you use the heredoc.)
+- **The prompt comes from a file, on stdin (`- < file`).** If stdin is left open, `codex exec`
+  prints `Reading additional input from stdin...` and waits forever with zero output — it looks
+  exactly like a slow review. And plan text typed into a shell command can execute (plans contain
+  backticks and `$`). No file-writing tool? A heredoc is safe ONLY with a quoted delimiter you invent
+  fresh each time and that appears nowhere in the prompt, e.g. `<<'CROSSCHECK_9f3c1a7e'` — with a
+  fixed word, a plan line matching it ends the heredoc early and the rest runs as shell commands.
 - **The first line names it the reviewer**, so it does not start a cross-check of its own.
 - **`--skip-git-repo-check`** so a run outside a git repo doesn't fail; harmless in a read-only sandbox.
-- **Give it 10 minutes.** A real review takes 1–10 minutes. Run the call with your shell tool's
-  longest timeout (Claude Code's Bash tool: `timeout: 600000`). The default 2-minute limit kills a
-  normal review halfway and makes it look like Codex failed.
+- **10 minutes** because a real review takes 1–10. Claude Code's default 2-minute Bash limit cuts a
+  normal review off halfway and makes it look like Codex failed.
 
 **TIMEOUT / hang handling:** if the reviewer call times out or errors, treat it as a failed round and
 go to FALLBACK below — do not wait indefinitely and do not silently drop the check. If a sandbox

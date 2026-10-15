@@ -26,28 +26,32 @@ whether a plan qualifies, it qualifies. Note: on a repo where *most* work is pro
 this fires often by design — if that's too much, the user can say "high only" for the session to
 narrow the trigger and cut spend.
 
-**HOW:** run non-interactively, review-only — Claude may read, never write. Use exactly this shape:
-```bash
-f="$(mktemp)"
-cat > "$f" <<'CROSSCHECK_EOF'
-You are the cross-check REVIEWER, invoked by Codex. Do NOT start a cross-check of your own.
-Find what's broken, wrong, missing, or will bite in production. Severity floor: MEDIUM and up.
-<the plan or diff>
-CROSSCHECK_EOF
-claude -p --tools Read,Grep,Glob --permission-mode plan --strict-mcp-config < "$f"
-```
+**HOW:** run non-interactively, review-only — Claude may read, never write. Three steps:
+1. **Write the review prompt to a NEW temp file with your file-writing tool** (e.g.
+   `/tmp/crosscheck-<random>.md`) — never `echo` it and never put it inline in a command. Start the
+   file with these two lines, then the plan or diff:
+   ```
+   You are the cross-check REVIEWER, invoked by Codex. Do NOT start a cross-check of your own.
+   Find what's broken, wrong, missing, or will bite in production. Severity floor: MEDIUM and up.
+   ```
+2. **Run it with that file on stdin and a timeout of at least 600000 ms (10 minutes):**
+   `claude -p --tools Read,Grep,Glob --permission-mode plan --strict-mcp-config < /tmp/crosscheck-<random>.md`
+3. **Delete the file afterwards** (`rm -f`) — it can hold secrets from the diff.
+
 Each part prevents a failure that has really happened:
 - **`--tools Read,Grep,Glob` is what makes it read-only** — those become the ONLY tools that exist.
   Do NOT swap in `--allowedTools`: that only *adds* permissions on top of the user's own settings,
   so anyone who allows Edit or Bash globally gets a "reviewer" that can write files (tested: it did).
 - **`--permission-mode plan`** overrides a user default of auto / bypassPermissions;
   **`--strict-mcp-config`** loads no MCP servers (no side doors, faster start).
-- **The prompt goes in a file and comes in on stdin (`< "$f"`).** Never paste the plan inline as a
-  quoted argument: plans contain backticks and `$`, which the shell would execute. An open stdin can
-  also leave the CLI waiting forever. (Writing `$f` with your file tool is fine too.)
+- **The prompt comes from a file, on stdin.** Plan text typed into a shell command can execute
+  (plans contain backticks and `$`), and an open stdin can leave the CLI waiting forever. No
+  file-writing tool? A heredoc is safe ONLY with a quoted delimiter you invent fresh each time and
+  that appears nowhere in the prompt, e.g. `<<'CROSSCHECK_9f3c1a7e'` — with a fixed word, a plan
+  line matching it ends the heredoc early and the rest of the plan runs as shell commands.
 - **The first line names it the reviewer**, so it does not start a cross-check of its own.
-- **Give it 10 minutes** — set the shell call's timeout to at least 600000 ms. A real review takes
-  1–10 minutes; a short timeout kills it halfway and makes it look like Claude failed.
+- **10 minutes** because a real review takes 1–10; a short timeout cuts it off halfway and makes it
+  look like Claude failed.
 
 **TIMEOUT / hang handling:** if the reviewer call times out or errors, treat it as a failed round and
 go to FALLBACK below — do not wait indefinitely and do not silently drop the check. If a sandbox

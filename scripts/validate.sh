@@ -37,17 +37,20 @@ check "[codex tmpl] no reference to a claude-review wrapper"       bash -c "! gr
 check "[both tmpl] receipt rule present"  bash -c "grep -ql 'Cross-check:' '$REPO/templates/claude-crosscheck.md' && grep -ql 'Cross-check:' '$REPO/templates/codex-crosscheck.md'"
 # regression guards for failures seen in real use
 CT="$REPO/templates/claude-crosscheck.md"; XT="$REPO/templates/codex-crosscheck.md"
-check "[claude tmpl] codex reads the prompt from a file on stdin (no stdin hang)"  grep -qF 'codex exec --sandbox read-only --skip-git-repo-check - < "$f"' "$CT"
+check "[claude tmpl] codex reads the prompt from a file on stdin (no stdin hang)"  grep -qF 'codex exec --sandbox read-only --skip-git-repo-check - < /tmp/crosscheck-' "$CT"
 check "[claude tmpl] tells Claude to use the 10-minute shell timeout"            grep -qF 'timeout: 600000' "$CT"
-check "[codex tmpl] claude reviewer is truly read-only (--tools + plan mode)"     grep -qF 'claude -p --tools Read,Grep,Glob --permission-mode plan --strict-mcp-config < "$f"' "$XT"
-check "[codex tmpl] no reviewer command relies on --allowedTools alone"           bash -c "! grep -E '^claude -p .*--allowedTools' '$XT'"
+check "[codex tmpl] claude reviewer is truly read-only (--tools + plan mode)"     grep -qF 'claude -p --tools Read,Grep,Glob --permission-mode plan --strict-mcp-config < /tmp/crosscheck-' "$XT"
+check "[codex tmpl] no claude -p command uses --allowedTools"                     bash -c "! grep -E 'claude -p[^\`]*--allowedTools' '$XT'"
 check "[both tmpl] prompt opens with the reviewer line (recursion guard)"         bash -c "grep -q 'You are the cross-check REVIEWER' '$CT' && grep -q 'You are the cross-check REVIEWER' '$XT'"
-check "[both tmpl] heredoc delimiter is quoted (no shell expansion of the plan)"  bash -c "grep -qF \"<<'CROSSCHECK_EOF'\" '$CT' && grep -qF \"<<'CROSSCHECK_EOF'\" '$XT'"
+check "[both tmpl] heredoc fallback demands a fresh, unique delimiter"           bash -c "grep -q 'appears nowhere in the prompt' '$CT' && grep -q 'appears nowhere in the prompt' '$XT'"
+check "[both tmpl] no fixed heredoc delimiter left in the commands"               bash -c "! grep -qF \"<<'CROSSCHECK_EOF'\" '$CT' && ! grep -qF \"<<'CROSSCHECK_EOF'\" '$XT'"
+check "[both tmpl] says to delete the prompt file afterwards"                     bash -c "grep -q 'Delete the file afterwards' '$CT' && grep -q 'Delete the file afterwards' '$XT'"
 
 # ---------- install.sh behavior in a sandbox HOME ----------
 SB="$(mktemp -d)"
 trap 'rm -rf "$SB"' EXIT
-run_install() { HOME="$SB/home" bash "$REPO/install.sh" "$@" 2>&1; }
+# run the installer with the SAME bash running this test (CI runs it under macOS /bin/bash 3.2)
+run_install() { HOME="$SB/home" "$BASH" "$REPO/install.sh" "$@" 2>&1; }
 
 # fresh install creates both files identical to the templates
 rm -rf "${SB:?}/home"; mkdir -p "$SB/home"
@@ -125,6 +128,12 @@ echo "$out" | grep -q "already has its own cross-check rule" && ok "[own-rule] c
 run_install --force >/dev/null
 check "[own-rule --force] block added"        grep -q '^<!-- BEGIN claude-codex-crosscheck' "$SB/home/.claude/CLAUDE.md"
 check "[own-rule --force] own rule preserved" grep -q 'always review' "$SB/home/.claude/CLAUDE.md"
+# once our block is in, a PLAIN re-run must still update it (never strand someone on an old block)
+sed -i.orig 's/adversarial/ADVERSARIAL-STALE/' "$SB/home/.claude/CLAUDE.md"
+out="$(run_install)"; rc=$?
+[ $rc -eq 0 ] && ok "[own-rule update] plain re-run exits 0" || bad "[own-rule update] plain re-run exits 0 (rc=$rc)"
+check "[own-rule update] stale block refreshed"  bash -c "! grep -q 'ADVERSARIAL-STALE' '$SB/home/.claude/CLAUDE.md'"
+check "[own-rule update] own rule still there"   grep -q 'always review' "$SB/home/.claude/CLAUDE.md"
 # and a normal re-run after install is still fine (the managed block's own heading doesn't count)
 rm -rf "${SB:?}/home"; mkdir -p "$SB/home"
 run_install >/dev/null; out="$(run_install)"; rc=$?
@@ -135,7 +144,7 @@ mkdir -p "$SB/bin"
 printf '#!/bin/sh\necho "-p, --print --tools --permission-mode --strict-mcp-config"\n' > "$SB/bin/claude"
 printf '#!/bin/sh\necho "--sandbox --skip-git-repo-check"\n' > "$SB/bin/codex"
 chmod +x "$SB/bin/claude" "$SB/bin/codex"
-run_check() { HOME="$SB/home" PATH="$SB/bin:$PATH" bash "$REPO/install.sh" --check 2>&1; }
+run_check() { HOME="$SB/home" PATH="$SB/bin:$PATH" "$BASH" "$REPO/install.sh" --check 2>&1; }
 rm -rf "${SB:?}/home"; mkdir -p "$SB/home"
 out="$(run_check)"; rc=$?
 [ $rc -ne 0 ] && ok "[check] not installed -> non-zero" || bad "[check] not installed -> non-zero"
@@ -161,6 +170,16 @@ printf '# Codex Cross-Check (mine)\n' > "$SB/home/.claude/CLAUDE.md"
 printf '## Claude Cross-Check (mine)\n' > "$SB/home/.codex/AGENTS.md"
 out="$(run_check)"; rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q "own hand-written cross-check rule" && ok "[check] own hand-written rule reported, not a failure" || bad "[check] own hand-written rule reported, not a failure (rc=$rc)"
+
+# a missing CLI is a problem, never "All good"
+rm -rf "${SB:?}/home"; mkdir -p "$SB/home"; run_install >/dev/null
+out="$(HOME="$SB/home" PATH="/usr/bin:/bin" "$BASH" "$REPO/install.sh" --check 2>&1)"; rc=$?
+[ $rc -ne 0 ] && ! echo "$out" | grep -q "All good" && ok "[check] missing CLIs -> non-zero, no 'All good'" || bad "[check] missing CLIs -> non-zero, no 'All good' (rc=$rc)"
+
+# two modes at once are refused, and nothing is uninstalled
+out="$(run_install --check --uninstall)"; rc=$?
+[ $rc -ne 0 ] && ok "[args] --check + --uninstall refused" || bad "[args] --check + --uninstall refused"
+check "[args] block still installed after refused combo"  grep -q '^<!-- BEGIN claude-codex-crosscheck' "$SB/home/.claude/CLAUDE.md"
 
 # unknown options are refused
 out="$(run_install --bogus)"; rc=$?
