@@ -15,8 +15,9 @@
 #     marker makes the script ABORT that file with a clear message instead of deleting content.
 #   • Symlinked targets are written through (the link is preserved); file mode is preserved.
 #   • If the resulting content is identical to what's already there, nothing is written at all.
-#   • If a file already has its OWN cross-check rule (a "Cross-Check" heading outside the managed
-#     block), that file is left untouched so you never end up with two conflicting rules.
+#   • On a FIRST install, a file that already has its OWN cross-check rule (a "Cross-Check" heading)
+#     is left untouched so you never end up with two conflicting rules. Once the managed block is
+#     in a file, re-runs always update it.
 #
 # Usage:
 #   ./install.sh              # install / update

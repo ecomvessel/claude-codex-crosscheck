@@ -29,7 +29,8 @@ it's live*).
 
 You can install with only one CLI present, but then only the tool you actually run will act — and when
 it tries to call the *absent* one, it falls back to a single-vendor self-review (you're not getting
-true dual-vendor coverage until both are installed).
+true dual-vendor coverage until both are installed). `./install.sh --check` reports the missing CLI
+as a problem until you install it.
 
 ## Quickstart
 
